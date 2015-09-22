@@ -1,0 +1,487 @@
+﻿///$tab Change Log
+/*
+1.0.4 - 22/10/14
+----------------
+* Fixed bug with friemds code using incorrect cursor (from followers).			
+* Created _ThisReload and _NextReload versions of vNextAllowed[Follower|Friend]IDsRequest, vNextCursor[Follower|Friend]IDs variables and all are now shown in UI.
+* Changed required version check to 1.5.6.3.
+
+1.0.3 - 12/05/14
+----------------
+* UserLookupById now uses a processParamsSync file (rather than concatenating all user ids into the URL which resulted in URLs too long to be processed).
+* Now requires QVSource 1.5.3.3 or later.
+
+1.0.2 - 31/01/14
+----------------
+* Now only loads distinct ids.
+* Reviewed and tested against QVSource 1.4.9.6 (requires this version or later).
+* Now includes following (friends) functionality also.
+* Now includes User lookup.
+
+1.0.1 - 04/12/13
+----------------
+* Added badge.
+
+1.0.0 - 04/09/13
+----------------
+* Initial version.
+*/
+///$tab Setup
+SET ThousandSep=',';
+SET DecimalSep='.';
+SET MoneyThousandSep=',';
+SET MoneyDecimalSep='.';
+SET MoneyFormat='£#,##0.00;-£#,##0.00';
+SET TimeFormat='hh:mm:ss';
+SET DateFormat='DD/MM/YYYY';
+SET TimestampFormat='DD/MM/YYYY hh:mm:ss[.fff]';
+SET MonthNames='Jan;Feb;Mar;Apr;May;Jun;Jul;Aug;Sep;Oct;Nov;Dec';
+SET DayNames='Mon;Tue;Wed;Thu;Fri;Sat;Sun';
+
+// The account we want to get all follower ids for.
+let vUserName = 'cocacola';
+
+// Can be anything you like to distinguish this app from other apps which might 
+// be reloading at the same time.
+let vAppId = 'testapp';
+let vWorkingFolder = 'c:\QVSource\Temp\';
+
+// A stamp to identify a request. The only thing you need to be careful 
+// of is if you have multiple reloads happening on the same machine in 
+// parallel of the same table then this needs to be unique between these
+// requests.
+let vRequestStamp = 'myUniqueStamp';
+
+let vUTC = utc();
+
+let vQVSourcePort = '5555';
+
+sub CheckQVSourceStatus
+
+	set errormode = 0;
+
+	QVSourceStatus:
+	LOAD Version,
+		SubField(Version, '.', 1) as Version_Major,
+		SubField(Version, '.', 2) as Version_Minor,
+		SubField(Version, '.', 3) as Version_Build,
+		SubField(Version, '.', 4) as Version_Revision,
+		ServerMode,
+		Path,
+		Licensed,
+		LicenseExpires,
+		IsLicensedAsServer
+	FROM [http://localhost:$(vQVSourcePort)/QVSource?format=xml] (XmlSimple, Table is [QVSource]);
+         
+	if(ScriptError <> '') then   
+		//
+		// Looks like QVSOurce is not even running.
+		//
+		// Log message here or send email using QVSource Notifier Connector
+		//
+		trace 'QVSource is not running or not running on the requested port number.';
+		exit script;
+	endif
+
+	if(peek('ServerMode', 0, 'QVSourceStatus') = 'true' and peek('IsLicensedAsServer', 0, 'QVSourceStatus') <> 'true') then
+		//
+		// QVSource is running but not licensed to run in server mode.
+		//
+		// Log message here or send email using QVSource Notifier Connector
+		//
+		trace 'QVSource is running but not licensed to run in server mode.';
+		exit script;
+	endif     
+     
+	if(peek('Licensed', 0, 'QVSourceStatus') <> 'true') then
+		//
+		// QVSource is running but not licensed.
+		//
+		// Log message here or send email using QVSource Notifier Connector
+		//
+		trace 'QVSource is running but not licensed.';
+		exit script;
+	endif
+    
+	let currentVersionAsInt = (peek('Version_Major', 0, 'QVSourceStatus') * 1000) + (peek('Version_Minor', 0, 'QVSourceStatus') * 100) + (peek('Version_Build', 0, 'QVSourceStatus') * 10) + peek('Version_Revision', 0, 'QVSourceStatus');
+ 
+    if(currentVersionAsInt < 1563) then
+        // Log message here or send email using QVSource Notifier Connector
+        trace 'Version too low. Please update QVSource.';
+        exit script;
+    endif
+
+//	QVSourceConnectorStatus:
+//	LOAD Name as ConnectorName,
+//	    Version as ConnectorVersion,
+//	    Licensed as ConnectorLicensed
+//	FROM [http://localhost:$(vQVSourcePort)/QVSource?format=xml] (XmlSimple, Table is [QVSource/Connectors/Connector]);
+
+	//
+	// Run other QVSource or connector specific tests here before deciding whether
+	// to proceed and load the rest of the application.
+	//
+
+	drop table QVSourceStatus;
+	//drop table QVSourceConnectorStatus;
+
+	set errormode = 1;
+
+endsub
+///$tab buildFollowersQVD
+/*
+This function runs the FollowerIds table to extract as many followers as possible for the user
+specified in the $(vUserName).
+
+It will exhaust all the Twitter API calls for this table if necessary and store in the
+Post_FollowerIds_Info and QVD file details of whether this rate limit was reached and, if so, 
+when requests can be made again (the quota allowance for this part of the API is reset every
+15 minutes).
+*/
+sub buildFollowersQVD
+
+	// Assume we can load more followers
+	let vIsOK = 1;
+	let vNextCursorFollowerIDs = '';
+	
+	if not isnull(filesize('FollowerIds.qvd')) then
+		FollowerIds:
+		LOAD
+		* 
+		FROM 'FollowerIds.qvd' (qvd);
+	end if
+	
+	if not isnull(filesize('Post_FollowerIds_Info.qvd')) then
+	
+		Post_FollowerIds_Info:
+		LOAD
+		* 
+		FROM 'Post_FollowerIds_Info.qvd' (qvd);
+		
+		let vTmp = Peek('Post_FollowerIds_Info_utc_reset', 0, 'Post_FollowerIds_Info');
+		let vNextAllowedFollowerIDsRequest_ThisReload = timestamp#('$(vTmp)', 'DD-MM-YYYY hh:mm:ss');
+		let vNextCursorFollowerIDs_ThisReload = Peek('Post_FollowerIds_Info_next_cursor', 0, 'Post_FollowerIds_Info');
+		
+		let vIsOK = vNextAllowedFollowerIDsRequest_ThisReload > utc();
+		
+		drop table Post_FollowerIds_Info;
+	
+	end if
+	
+	IF(vIsOK <> -1) then
+	
+		IF(vNextCursorFollowerIDs_ThisReload = '0') then
+			trace 'Retrieved all available (next_cursor is zero)';
+		ELSE
+		
+			trace 'About to request follower ids with cursor=$(vNextCursorFollowerIDs_ThisReload)';
+			
+			FollowerIds:
+			LOAD Distinct
+				'$(vUserName)' as Following,
+			    id as FollowerIds_id
+			FROM
+			[http://localhost:$(vQVSourcePort)/QVSource/TwitterConnectorV2/?table=FollowerIds&appID=$(vAppId)&userName=$(vUserName)&requestStamp=$(vRequestStamp)&cursor=$(vNextCursorFollowerIDs_ThisReload)]
+			(qvx);
+		
+			store FollowerIds into FollowerIds.qvd (qvd);
+			
+			Post_FollowerIds_Info:
+			LOAD
+				'$(vUserName)' as UserName,
+				next_cursor as Post_FollowerIds_Info_next_cursor,
+				was_rate_limited as Post_FollowerIds_Info_was_rate_limited,
+				utc_reset as Post_FollowerIds_Info_utc_reset,
+				seconds_to_reset as Post_FollowerIds_Info_seconds_to_reset
+			FROM
+			[http://localhost:$(vQVSourcePort)/QVSource/TwitterConnectorV2/?table=Post_FollowerIds_Info&appID=$(vAppId)&requestStamp=$(vRequestStamp)]
+			(qvx);
+
+			let vTmp = Peek('Post_FollowerIds_Info_utc_reset', 0, 'Post_FollowerIds_Info');
+			let vNextAllowedFollowerIDsRequest_NextReload = timestamp#('$(vTmp)', 'DD-MM-YYYY hh:mm:ss');
+			let vNextCursorFollowerIDs_NextReload = Peek('Post_FollowerIds_Info_next_cursor', 0, 'Post_FollowerIds_Info');
+			
+			store Post_FollowerIds_Info into Post_FollowerIds_Info.qvd (qvd);
+			
+		ENDIF
+		
+	ELSE
+		trace 'Not able to get more ids at this point - next allowed at $(vNextAllowedFollowerIDsRequest_ThisReload)';
+	ENDIF
+	
+	//drop table FollowerIds;
+
+end sub
+///$tab buildFriendsQVD
+/*
+This does similar for friends as buildFollowersQVD does for followers.
+
+Please see the notes for buildFollowersQVD for more info.
+*/
+sub buildFriendsQVD
+	
+	// Assume we can load more friends
+	let vIsOK = 1;
+	let vNextCursorFriendIDs = '';
+	
+	if not isnull(filesize('FriendIds.qvd')) then
+		FriendIds:
+		LOAD
+		* 
+		FROM 'FriendIds.qvd' (qvd);
+	end if
+	
+	if not isnull(filesize('Post_FriendIds_Info.qvd')) then
+	
+		Post_FriendIds_Info:
+		LOAD
+		* 
+		FROM 'Post_FriendIds_Info.qvd' (qvd);
+		
+		let vTmp = Peek('Post_FriendIds_Info_utc_reset', 0, 'Post_FriendIds_Info');
+		let vNextAllowedFriendIDsRequest_ThisReload = timestamp#('$(vTmp)', 'DD-MM-YYYY hh:mm:ss');
+		let vNextCursorFriendIDs_ThisReload = Peek('Post_FriendIds_Info_next_cursor', 0, 'Post_FriendIds_Info');
+		
+		let vIsOK = vNextAllowedFriendIDsRequest_ThisReload > utc();
+		
+		drop table Post_FriendIds_Info;
+	
+	end if
+	
+	IF(vIsOK <> -1) then
+	
+		IF(vNextCursorFriendIDs_ThisReload = '0') then
+			trace 'Retrieved all available (next_cursor is zero)';
+		ELSE
+			trace 'About to request friend ids with cursor=$(vNextCursorFriendIDs_ThisReload)';
+					
+			FriendIds:
+			LOAD Distinct
+				'$(vUserName)' as Friend,
+			    id as FriendIds_id
+			FROM
+			[http://localhost:$(vQVSourcePort)/QVSource/TwitterConnectorV2/?table=FriendIds&appID=$(vAppId)&userName=$(vUserName)&requestStamp=$(vRequestStamp)&cursor=$(vNextCursorFriendIDs_ThisReload)]
+			(qvx);
+		
+			store FriendIds into FriendIds.qvd (qvd);
+			
+			Post_FriendIds_Info:
+			LOAD
+				'$(vUserName)' as UserName,
+				next_cursor as Post_FriendIds_Info_next_cursor,
+				was_rate_limited as Post_FriendIds_Info_was_rate_limited,
+				utc_reset as Post_FriendIds_Info_utc_reset,
+				seconds_to_reset as Post_FriendIds_Info_seconds_to_reset
+			FROM
+			[http://localhost:$(vQVSourcePort)/QVSource/TwitterConnectorV2/?table=Post_FriendIds_Info&appID=$(vAppId)&requestStamp=$(vRequestStamp)]
+			(qvx);
+
+			let vTmp = Peek('Post_FriendIds_Info_utc_reset', 0, 'Post_FriendIds_Info');
+			let vNextAllowedFriendIDsRequest_NextReload = timestamp#('$(vTmp)', 'DD-MM-YYYY hh:mm:ss');
+			let vNextCursorFriendIDs_NextReload = Peek('Post_FriendIds_Info_next_cursor', 0, 'Post_FriendIds_Info');
+			
+			store Post_FriendIds_Info into Post_FriendIds_Info.qvd (qvd);
+			
+		ENDIF
+		
+	ELSE
+		trace 'Not able to get more ids at this point - next allowed at $(vNextAllowedFriendIDsRequest_ThisReload)';
+	ENDIF
+		
+	//drop table FriendIds;
+
+END SUB
+///$tab buildUserIDsLeftToLookupQVD
+/*
+Based on the contents of FollowerIds.qvd and FriendIds.qvd and Users.qvd, this 
+function builds a list of disctinct UserIDs which we still need to lookup profile info 
+for.
+
+It places these in a table named UserIDsLeftToLookup with a single UserID column.
+*/
+sub buildUserIDsLeftToLookupQVD
+
+	if not isnull(filesize('Users.qvd')) then
+	
+		Users:
+		LOAD
+		* 
+		FROM 'Users.qvd' (qvd);
+			
+		if not isnull(filesize('FollowerIds.qvd')) then
+		
+			UserIDsLeftToLookup:
+			load distinct
+			FollowerIds_id as UserID
+			from
+			FollowerIds.qvd (qvd)
+			where not Exists(user_id, FollowerIds_id);
+		
+		endif
+		
+		if not isnull(filesize('FriendIds.qvd')) then
+		
+			UserIDsLeftToLookup:
+			load distinct
+			FriendIds_id as UserID
+			from
+			FriendIds.qvd (qvd)
+			where not Exists(user_id, FriendIds_id);
+		
+		endif
+	
+	else
+	
+		if not isnull(filesize('FollowerIds.qvd')) then
+		
+			UserIDsLeftToLookup:
+			load distinct
+			FollowerIds_id as UserID
+			from
+			FollowerIds.qvd (qvd);
+		
+		endif
+		
+		if not isnull(filesize('FriendIds.qvd')) then
+		
+			UserIDsLeftToLookup:
+			load distinct
+			FriendIds_id as UserID
+			from
+			FriendIds.qvd (qvd);
+		
+		endif
+	
+	endif
+	
+end sub
+///$tab buildUsersQVD
+/*
+This function looks up profile information for as many users in the 
+UserIDsLeftToLookup table as the API will allow.
+
+It also runs the Post_UserLookupById_Info table which allows you to check
+whether the rate limit was reached. This rate limit is reset every 15 minutes 
+and should allow looking up 1500 users in this interval.
+*/
+sub buildUsersQVD
+	
+	LET noRows = NoOfRows('UserIDsLeftToLookup');
+	
+	//trace 'Rows = $(noRows)';
+	
+	if not IsNull(noRows) and noRows > 0 then
+	
+		let vIsOK = 1;
+		
+		if not isnull(filesize('Post_UserLookupById_Info.qvd')) then
+		
+			Post_UserLookupById_Info:
+			LOAD
+			* 
+			FROM 'Post_UserLookupById_Info.qvd' (qvd);
+			
+			let vTmp = Peek('utc_reset', 0, 'Post_UserLookupById_Info');
+			let vNextAllowedUserLookupByID = timestamp#('$(vTmp)', 'DD-MM-YYYY hh:mm:ss');
+			
+			let vIsOK = vNextAllowedUserLookupByID > utc();
+			
+			drop table Post_UserLookupById_Info;
+		
+		end if
+
+		if(vIsOK <> -1) then
+		
+			// 
+			// Making use of this feature here:
+			// http://wiki.qvsource.com/Synchronous-Asynchronous-And-Batch-Requests-Explained.ashx
+			// Because concatenating all the ids into a string parameter to the QVSource Connector can result in a URL too long to be processed.
+			//				
+			Params:
+			Load concat(UserID,',') as userIds resident UserIDsLeftToLookup;
+						
+			let vParamsFile = '$(vWorkingFolder)$(vAppId)' & '_userIds.txt';
+			store Params into '$(vParamsFile)' (txt);
+			drop table Params; // Optional.
+		
+			trace 'About to lookup the following users $(noRows)';
+			
+			Users:
+			LOAD
+				user_id,
+				user_name,
+				user_screen_name as UserLookupById_user_screen_name,
+				user_location as UserLookupById_user_location,
+				user_profile_image_url as UserLookupById_user_profile_image_url,
+				user_description as UserLookupById_user_description,
+				user_url as UserLookupById_user_url,
+				user_geo_enabled as UserLookupById_user_geo_enabled,
+				user_protected as UserLookupById_user_protected,
+				user_followers_count as UserLookupById_user_followers_count,
+				user_friends_count as UserLookupById_user_friends_count,
+				user_listed_count as UserLookupById_user_listed_count,
+				user_favourites_count as UserLookupById_user_favourites_count,
+				user_statuses_count as UserLookupById_user_statuses_count,
+				user_created_at as UserLookupById_user_created_at,
+				timestamp#(mid(user_created_at, 9, 2) & '-' & mid(user_created_at, 5, 3) & '-' & mid(user_created_at, 27, 4) & ' ' & mid(user_created_at, 12, 8), 'DD-MMM-YYYY hh:mm:ss') as UserLookupById_user_user_created_at_timestamp,
+				date#(mid(user_created_at, 9, 2) & '-' & mid(user_created_at, 5, 3) & '-' & mid(user_created_at, 27, 4), 'DD-MMM-YYYY') as UserLookupById_user_user_created_at_date,
+				time#(mid(user_created_at, 12, 8), 'hh:mm:ss') as UserLookupById_user_user_created_at_time,
+				user_utc_offset as UserLookupById_user_utc_offset,
+				user_time_zone as UserLookupById_user_time_zone,
+				user_verified as UserLookupById_user_verified,
+				user_lang as UserLookupById_user_lang,
+				user_follow_request_sent as UserLookupById_user_follow_request_sent,
+				user_is_translator as UserLookupById_user_is_translator,
+				user_following as UserLookupById_user_following,
+				user_notifications as UserLookupById_user_notifications,
+				status_id as UserLookupById_status_id,
+				status_created_at as UserLookupById_status_created_at,
+				timestamp#(mid(status_created_at, 9, 2) & '-' & mid(status_created_at, 5, 3) & '-' & mid(status_created_at, 27, 4) & ' ' & mid(status_created_at, 12, 8), 'DD-MMM-YYYY hh:mm:ss') as UserLookupById_status_status_created_at_timestamp,
+				date#(mid(status_created_at, 9, 2) & '-' & mid(status_created_at, 5, 3) & '-' & mid(status_created_at, 27, 4), 'DD-MMM-YYYY') as UserLookupById_status_status_created_at_date,
+				time#(mid(status_created_at, 12, 8), 'hh:mm:ss') as UserLookupById_status_status_created_at_time,
+				status_text as UserLookupById_status_text
+				//
+				// THERE ARE EVEN MORE FIELDS WHICH THE CONNECTOR SUPPLIES WHICH COULD BE ADDED IN HERE IF DESIRED
+				//
+			FROM
+			[http://localhost:$(vQVSourcePort)/QVSource/TwitterConnectorV2/?table=UserLookupById&appID=$(vAppId)&processParamsSync=$(vParamsFile)&requestStamp=$(vRequestStamp)&noCache=true]
+			(qvx);
+			
+			store Users into Users.qvd (qvd);			
+		
+			//
+			// You can check here if necessary if the above request was rate limited by the API
+			// and therefore not all results were retrieved.
+			//
+			// However, this demo is set up so if reloaded 15 minutes later it should retrieve the 
+			// next block of user info data.
+			//
+			Post_UserLookupById_Info:
+			LOAD
+				was_rate_limited,
+				utc_reset,
+				seconds_to_reset
+			FROM
+			[http://localhost:$(vQVSourcePort)/QVSource/TwitterConnectorV2/?table=Post_UserLookupById_Info&appID=$(vAppId)&requestStamp=$(vRequestStamp)]
+			(qvx);
+			
+			store Post_UserLookupById_Info into Post_UserLookupById_Info.qvd (qvd);
+			
+		else
+			trace 'Not able to lookup more users yet due to API quota';
+		endif // if vIsOK
+
+	else
+		trace 'No users left to lookup.';		
+	endif // if not IsNull(noRows) and noRows > 0 then
+	
+end sub
+///$tab Main
+call CheckQVSourceStatus
+
+call buildFollowersQVD
+call buildFriendsQVD
+
+call buildUserIDsLeftToLookupQVD
+
+call buildUsersQVD

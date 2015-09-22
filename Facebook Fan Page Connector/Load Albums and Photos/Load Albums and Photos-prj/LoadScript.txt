@@ -1,0 +1,200 @@
+﻿///$tab Change Log
+/*
+1.0.2 - 04/12/13
+----------------
+* Added badge.
+
+1.0.1 - 29/07/13
+----------------
+* Added change log
+* Added has_comments and has_likes fields to Photos and Albums tables.
+* Added name field to Photos table.
+* Added vMaxItems parameter.
+* Updated chart objects.
+* Moved script into separate tabs.
+*/
+///$tab Config
+// **********************************************
+// Config:
+// Enter your facebook fan page name or id here:
+let vFacebookFanpageNameOrId = '';
+// **********************************************
+
+let vMaxItems = -1; // Can set this to a small number for testing and debugging.
+let vError = '';
+
+if vFacebookFanpageNameOrId = '' then
+	let vError = 'Please set vFacebookFanpageNameOrId variable in load script.';
+	trace '$(vError)';
+	exit script;
+endif
+
+let vWorkingFolder = 'c:\QVSource\Temp\';
+let vQVSourceAppId = 'FacebookAlbumDemo';
+///$tab Albums
+SET ThousandSep=',';
+SET DecimalSep='.';
+SET MoneyThousandSep=',';
+SET MoneyDecimalSep='.';
+SET MoneyFormat='£#,##0.00;-£#,##0.00';
+SET TimeFormat='hh:mm:ss';
+SET DateFormat='DD/MM/YYYY';
+SET TimestampFormat='DD/MM/YYYY hh:mm:ss[.fff]';
+SET MonthNames='Jan;Feb;Mar;Apr;May;Jun;Jul;Aug;Sep;Oct;Nov;Dec';
+SET DayNames='Mon;Tue;Wed;Thu;Fri;Sat;Sun';
+
+FacebookFanPagesConnector_Albums:
+LOAD
+	created_time as Album_created_time,
+	timestamp#(mid(created_time, 1, 10) & mid(created_time, 12, 8), 'YYYY-MM-DDhh:mm:ss') as Album_created_time_qvdatetime,
+	date#(subfield(created_time, 'T', 1), 'YYYY-MM-DD') as Album_created_time_qvdate,
+	time#(subfield(created_time, 'T', 2), 'hh:mm:ss+0000') as Album_created_time_qvtime,
+	updated_time as Album_updated_time,
+	timestamp#(mid(updated_time, 1, 10) & mid(updated_time, 12, 8), 'YYYY-MM-DDhh:mm:ss') as Album_updated_time_qvdatetime,
+	date#(subfield(updated_time, 'T', 1), 'YYYY-MM-DD') as Album_updated_time_qvdate,
+	time#(subfield(updated_time, 'T', 2), 'hh:mm:ss+0000') as Album_updated_time_qvtime,
+	id as Album_id,
+	from_name as Album_from_name,
+	from_id as Album_from_id,
+	from_category as Album_from_category,
+	name as Album_name,
+	description as Album_description,
+	link as Album_link,
+	cover_photo as Album_cover_photo,
+	count as Album_count,
+	type as Album_type,
+	has_likes as Album_has_likes,
+	has_comments as Album_has_comments
+FROM
+[http://localhost:5555/QVSource/FacebookFanPagesConnector/?table=Albums&appID=&FacebookPageOrId=$(vFacebookFanpageNameOrId)&MaxNumberOfItems=$(vMaxItems)&noCache=true&format=qvx]
+(qvx);
+
+Params:
+load
+Album_id as rowKey,
+Album_id as ObjectId
+resident
+FacebookFanPagesConnector_Albums
+where Album_has_likes = 'true';
+
+let vParamsFile = '$(vWorkingFolder)$(vQVSourceAppId)' & '_FeedItemIds.txt';
+store Params into '$(vParamsFile)' (txt);
+drop table Params;
+
+FacebookFanPagesConnector_AlbumLikes:
+// Could also JOIN the tables here but need to then take into account possible null values (e.g. set to 0)
+//join (FacebookFanPagesConnector_Albums) 
+LOAD
+	rowKey as Album_id,
+	total_count as Album_Likes
+FROM
+[http://localhost:5555/QVSource/FacebookFanPagesConnector/?table=LikeCountForItem&appID=$(vQVSourceAppId)&processParamsSync=$(vParamsFile)&noCache=true&format=qvx]
+(qvx);
+
+Params:
+load
+Album_id as rowKey,
+Album_id as ObjectId
+resident
+FacebookFanPagesConnector_Albums
+where Album_has_comments = 'true';
+
+let vParamsFile = '$(vWorkingFolder)$(vQVSourceAppId)' & '_FeedItemIds.txt';
+store Params into '$(vParamsFile)' (txt);
+drop table Params;
+
+FacebookFanPagesConnector_AlbumComments:
+// Could also JOIN the tables here but need to then take into account possible null values (e.g. set to 0)
+//join (FacebookFanPagesConnector_Albums)
+LOAD
+	rowKey as Album_id,
+	total_count as Album_Comments
+FROM
+[http://localhost:5555/QVSource/FacebookFanPagesConnector/?table=CommentCountForItem&appID=$(vQVSourceAppId)&processParamsSync=$(vParamsFile)&noCache=true&format=qvx]
+(qvx);
+///$tab Photos
+Params:
+load
+Album_id as rowKey,
+Album_id as FacebookPageOrId,
+-1 as MaxNumberOfItems
+resident
+FacebookFanPagesConnector_Albums;
+
+let vParamsFile = '$(vWorkingFolder)$(vQVSourceAppId)' & '_FeedItemIds.txt';
+store Params into '$(vParamsFile)' (txt);
+drop table Params;
+
+FacebookFanPagesConnector_Photos:
+LOAD
+	rowKey as Album_id,
+	id as Photo_id,
+	created_time as Photo_created_time,
+	name as Photo_name,
+	timestamp#(mid(created_time, 1, 10) & mid(created_time, 12, 8), 'YYYY-MM-DDhh:mm:ss') as Photo_created_time_qvdatetime,
+	date#(subfield(created_time, 'T', 1), 'YYYY-MM-DD') as Photo_created_time_qvdate,
+	time#(subfield(created_time, 'T', 2), 'hh:mm:ss+0000') as Photo_created_time_qvtime,
+	updated_time as Photo_updated_time,
+	timestamp#(mid(updated_time, 1, 10) & mid(updated_time, 12, 8), 'YYYY-MM-DDhh:mm:ss') as Photo_updated_time_qvdatetime,
+	date#(subfield(updated_time, 'T', 1), 'YYYY-MM-DD') as Photo_updated_time_qvdate,
+	time#(subfield(updated_time, 'T', 2), 'hh:mm:ss+0000') as Photo_updated_time_qvtime,
+	from_name as Photo_from_name,
+	from_category as Photo_from_category,
+	from_id as Photo_from_id,
+	picture as Photo_picture,
+	source as Photo_source,
+	height as Photo_height,
+	width as Photo_width,
+	has_likes as Photo_has_likes,
+	has_comments as Photo_has_comments,
+	link as Photo_link,
+	icon as Photo_icon
+FROM
+[http://localhost:5555/QVSource/FacebookFanPagesConnector/?table=Photos&appID=$(vQVSourceAppId)&processParamsSync=$(vParamsFile)&noCache=true&format=qvx]
+(qvx);
+
+Params:
+load
+Photo_id as rowKey,
+Photo_id as ObjectId
+resident
+FacebookFanPagesConnector_Photos
+where Photo_has_likes = 'true';
+
+let vParamsFile = '$(vWorkingFolder)$(vQVSourceAppId)' & '_FeedItemIds.txt';
+store Params into '$(vParamsFile)' (txt);
+drop table Params;
+
+FacebookFanPagesConnector_PhotoLikes:
+// Could also JOIN the tables here but need to then take into account possible null values (e.g. set to 0)
+//join (FacebookFanPagesConnector_Photos) 
+LOAD
+	rowKey as Photo_id,
+	total_count as Photo_Likes
+FROM
+[http://localhost:5555/QVSource/FacebookFanPagesConnector/?table=LikeCountForItem&appID=$(vQVSourceAppId)&processParamsSync=$(vParamsFile)&noCache=true&format=qvx]
+(qvx);
+
+Params:
+load
+Photo_id as rowKey,
+Photo_id as ObjectId
+resident
+FacebookFanPagesConnector_Photos
+where Photo_has_comments = 'true';
+
+let vParamsFile = '$(vWorkingFolder)$(vQVSourceAppId)' & '_FeedItemIds.txt';
+store Params into '$(vParamsFile)' (txt);
+drop table Params;
+
+FacebookFanPagesConnector_PhotoComments:
+// Could also JOIN the tables here but need to then take into account possible null values (e.g. set to 0)
+//join (FacebookFanPagesConnector_Photos) 
+LOAD
+	rowKey as Photo_id,
+	total_count as Photo_Comments
+FROM
+[http://localhost:5555/QVSource/FacebookFanPagesConnector/?table=CommentCountForItem&appID=$(vQVSourceAppId)&processParamsSync=$(vParamsFile)&noCache=true&format=qvx]
+(qvx);
+
+exit script;
